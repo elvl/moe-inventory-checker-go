@@ -117,38 +117,38 @@ func main() {
 }
 
 func run() error {
-  // userdataフォルダのパスを確定
-  userdataPath, err := findUserdataPath()
-  if err != nil {
-    return fmt.Errorf("userdata フォルダが見つからないか使用できないため処理を中断しました。\n-p もしくは --path オプションで正しいパスを指定してください。\n詳細: %w", err)
-  }
+	// userdataフォルダのパスを確定
+	userdataPath, err := findUserdataPath()
+	if err != nil {
+		return fmt.Errorf("userdata フォルダが見つからないか使用できないため処理を中断しました。\n-p もしくは --path オプションで正しいパスを指定してください。\n詳細: %w", err)
+	}
 
-  fmt.Printf(`
+	fmt.Printf(`
       path: %s
 log number: mlog_yy_mm_dd_%d.txt (-n もしくは --number オプションで指定)
      limit: %d (-l もしくは --limit オプションで指定)
 `, userdataPath, options.logNumber, options.limit)
 
-  // キャラクターリストの取得
-  charaList, err := getCharacterList(userdataPath)
-  if err != nil {
-    return fmt.Errorf("キャラクターリストの取得に失敗しました: %w", err)
-  }
+	// キャラクターリストの取得
+	charaList, err := getCharacterList(userdataPath)
+	if err != nil {
+		return fmt.Errorf("キャラクターリストの取得に失敗しました: %w", err)
+	}
 
-  // 各キャラクターのログを読み込む
-  for i := range charaList {
-    // readLogfiles に userdataPath を渡すように修正
-    if err := readLogfiles(&charaList[i], userdataPath); err != nil {
-      fmt.Fprintf(os.Stderr, "\n%s のログ読み込み中にエラー: %v\n", charaList[i].Name, err)
-    }
-  }
+	// 各キャラクターのログを読み込む
+	for i := range charaList {
+		// readLogfiles に userdataPath を渡すように修正
+		if err := readLogfiles(&charaList[i], userdataPath); err != nil {
+			fmt.Fprintf(os.Stderr, "\n%s のログ読み込み中にエラー: %v\n", charaList[i].Name, err)
+		}
+	}
 
-  // HTMLを生成して出力
-  if err := generateHTML(charaList, userdataPath); err != nil {
-    return fmt.Errorf("HTMLの生成に失敗しました: %w", err)
-  }
+	// HTMLを生成して出力
+	if err := generateHTML(charaList, userdataPath); err != nil {
+		return fmt.Errorf("HTMLの生成に失敗しました: %w", err)
+	}
 
-  return nil
+	return nil
 }
 
 // userdataのパスを探す
@@ -249,13 +249,14 @@ func updateProgress(chara *Character, current, total int, filename string) {
 
 // ログファイルを読み込む
 func readLogfiles(chara *Character, userdataPath string) error {
-  charaPath := filepath.Join(userdataPath, chara.DirEntry.Name())
-  logFileRegex := regexp.MustCompile(fmt.Sprintf(`^mlog_(\d{2})_(\d{2})_(\d{2})_%d\.txt$`, options.logNumber))
+	charaPath := filepath.Join(userdataPath, chara.DirEntry.Name())
+	// 修正点①: 正規表現のプレフィクス部分を `^.*` に変更し、mlog_ と mlogw_ の両方（および他の可能性）に対応
+	logFileRegex := regexp.MustCompile(fmt.Sprintf(`^.*_(\d{2})_(\d{2})_(\d{2})_%d\.txt$`, options.logNumber))
 
-  entries, err := os.ReadDir(charaPath)
-  if err != nil {
-    return err
-  }
+	entries, err := os.ReadDir(charaPath)
+	if err != nil {
+		return err
+	}
 
 	var logFiles []LogFile
 	for _, entry := range entries {
@@ -297,11 +298,18 @@ func readLogfiles(chara *Character, userdataPath string) error {
 			continue
 		}
 
-		// Shift_JISからUTF-8に変換するリーダーを作成
-		sjisReader := transform.NewReader(file, japanese.ShiftJIS.NewDecoder())
-		scanner := bufio.NewScanner(sjisReader)
-		var mode string
+		// 修正点②: ファイル名に応じてデコーダを切り替える
+		var scanner *bufio.Scanner
+		if strings.HasPrefix(logFile.Name(), "mlogw_") {
+			// mlogw_ で始まるファイルはUTF-8としてそのまま読み込む
+			scanner = bufio.NewScanner(file)
+		} else {
+			// それ以外は従来通りShift_JISとして読み込む
+			sjisReader := transform.NewReader(file, japanese.ShiftJIS.NewDecoder())
+			scanner = bufio.NewScanner(sjisReader)
+		}
 
+		var mode string
 		for scanner.Scan() {
 			line := scanner.Text()
 
@@ -320,7 +328,6 @@ func readLogfiles(chara *Character, userdataPath string) error {
 				status = &chara.Bank
 			}
 
-			// 既に新しいデータがあればスキップ
 			if status.Updated != nil && logFile.Date.Before(*status.Updated) {
 				continue
 			}
