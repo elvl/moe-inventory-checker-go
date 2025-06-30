@@ -14,7 +14,10 @@ import (
 	"sort"
 	"strings"
 	"time"
+    "io"
+    "bytes"
 
+    "golang.org/x/text/encoding/unicode"
 	"github.com/mattn/go-runewidth"
 	"github.com/pkg/browser"
 	"golang.org/x/sys/windows/registry"
@@ -247,10 +250,14 @@ func updateProgress(chara *Character, current, total int, filename string) {
 	fmt.Printf("\r%s %s %s %s", server, name, progress, filename)
 }
 
+var (
+	utf8BOM    = []byte{0xEF, 0xBB, 0xBF}
+	utf16leBOM = []byte{0xFF, 0xFE}
+)
+
 // ログファイルを読み込む
 func readLogfiles(chara *Character, userdataPath string) error {
 	charaPath := filepath.Join(userdataPath, chara.DirEntry.Name())
-	// 修正点①: 正規表現のプレフィクス部分を `^.*` に変更し、mlog_ と mlogw_ の両方（および他の可能性）に対応
 	logFileRegex := regexp.MustCompile(fmt.Sprintf(`^.*_(\d{2})_(\d{2})_(\d{2})_%d\.txt$`, options.logNumber))
 
 	entries, err := os.ReadDir(charaPath)
@@ -265,7 +272,6 @@ func readLogfiles(chara *Character, userdataPath string) error {
 		}
 		m := logFileRegex.FindStringSubmatch(entry.Name())
 		if m != nil {
-			// 年, 月, 日
 			year := 2000 + toInt(m[1])
 			month := toInt(m[2])
 			day := toInt(m[3])
@@ -283,7 +289,7 @@ func readLogfiles(chara *Character, userdataPath string) error {
 	}
 
 	sort.Slice(logFiles, func(i, j int) bool {
-		return logFiles[i].Date.After(logFiles[j].Date) // 日付で降順ソート
+		return logFiles[i].Date.After(logFiles[j].Date)
 	})
 
 	for i, logFile := range logFiles {
@@ -298,16 +304,27 @@ func readLogfiles(chara *Character, userdataPath string) error {
 			continue
 		}
 
-		// 修正点②: ファイル名に応じてデコーダを切り替える
-		var scanner *bufio.Scanner
-		if strings.HasPrefix(logFile.Name(), "mlogw_") {
-			// mlogw_ で始まるファイルはUTF-8としてそのまま読み込む
-			scanner = bufio.NewScanner(file)
-		} else {
-			// それ以外は従来通りShift_JISとして読み込む
-			sjisReader := transform.NewReader(file, japanese.ShiftJIS.NewDecoder())
-			scanner = bufio.NewScanner(sjisReader)
+		bomBuffer := make([]byte, 3)
+		n, _ := file.Read(bomBuffer)
+		bomBuffer = bomBuffer[:n]
+
+		var reader io.Reader
+		switch {
+		case bytes.HasPrefix(bomBuffer, utf16leBOM):
+			transformer := unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM).NewDecoder()
+			reader = transform.NewReader(io.MultiReader(bytes.NewReader(bomBuffer), file), transformer)
+
+		case bytes.HasPrefix(bomBuffer, utf8BOM):
+			// BOMの3バイトをスキップしてリーダーを作る (UTF-8はデコーダ不要)
+			reader = io.MultiReader(bytes.NewReader(bomBuffer[3:]), file)
+
+		default:
+			// Shift_JISデコーダ(Transformer)を取得する
+			transformer := japanese.ShiftJIS.NewDecoder()
+			reader = transform.NewReader(io.MultiReader(bytes.NewReader(bomBuffer), file), transformer)
 		}
+
+		scanner := bufio.NewScanner(reader)
 
 		var mode string
 		for scanner.Scan() {
@@ -318,21 +335,11 @@ func readLogfiles(chara *Character, userdataPath string) error {
 			} else if bankRegex.MatchString(line) {
 				mode = "bank"
 			}
-
-			if mode == "" {
-				continue
-			}
-
+			if mode == "" { continue }
 			status := &chara.Inventory
-			if mode == "bank" {
-				status = &chara.Bank
-			}
-
-			if status.Updated != nil && logFile.Date.Before(*status.Updated) {
-				continue
-			}
+			if mode == "bank" { status = &chara.Bank }
+			if status.Updated != nil && logFile.Date.Before(*status.Updated) { continue }
 			status.Updated = &logFile.Date
-
 			m := logRegex.FindStringSubmatch(line)
 			if m != nil {
 				questName := m[2]
@@ -342,7 +349,7 @@ func readLogfiles(chara *Character, userdataPath string) error {
 		}
 		file.Close()
 	}
-	fmt.Print("\n") // プログレスバーの行をクリア
+	fmt.Print("\n")
 	return nil
 }
 
